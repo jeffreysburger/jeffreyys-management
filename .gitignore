@@ -8,3 +8,6 @@ playwright-report/
 test-results/
 secrets/
 backups/
+output/playwright/
+public/ocr/
+*.traineddata

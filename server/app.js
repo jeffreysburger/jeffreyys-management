@@ -4,6 +4,7 @@ import { resolve } from "node:path";
 import { randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createStore, safeEmployee, checkPin } from "./store.js";
+import { createMysqlStore } from "./mysql-store.js";
 import { filterState, action, fail, payroll } from "./domain.js";
 
 const sessionUser = (employee) =>
@@ -19,7 +20,7 @@ const sessionUser = (employee) =>
 
 export async function createApp({
   dataFile = fileURLToPath(new URL("./data/state.json", import.meta.url)),
-  demo = false, bootstrap, production = false, origin, trustProxy = false,
+  demo = false, bootstrap, database, production = false, origin, trustProxy = false,
   secureCookie = production, assumeHttps = false, staticDir, aiFetch = fetch,
 } = {}) {
   if (production && (demo || !secureCookie || !origin || new URL(origin).protocol !== "https:"))
@@ -29,7 +30,7 @@ export async function createApp({
   if (assumeHttps && (!production || !origin || new URL(origin).protocol !== "https:"))
     throw new Error("HTTPS proxy mode requires production and an HTTPS APP_ORIGIN");
   if (staticDir) await access(resolve(staticDir, "index.html"));
-  const store = await createStore(dataFile, { demo, bootstrap }),
+  const store = database ? await createMysqlStore(database, { demo, bootstrap }) : await createStore(dataFile, { demo, bootstrap }),
     app = express(),
     sessions = new Map(),
     attempts = new Map(),
@@ -41,6 +42,7 @@ export async function createApp({
     stopping = true;
     for (const c of clients) c.res.end();
     clearInterval(cleanup);
+    clearInterval(databasePoll);
     await store.close();
   };
   app.locals.stopEvents = () => { stopping = true; for (const c of clients) c.res.end(); };
@@ -51,7 +53,12 @@ export async function createApp({
   }, 60000);
   cleanup.unref();
   app.set("trust proxy", trustProxy);
-  app.get("/healthz", (req,res) => res.status(stopping ? 503 : 200).json({status:stopping ? "stopping" : "ok"}));
+  app.get("/healthz", async (req,res) => {
+    try {
+      if (await store.refresh?.()) invalidate();
+      res.status(stopping ? 503 : 200).json({status:stopping ? "stopping" : "ok", storage: database ? "mysql" : "file"});
+    } catch { res.status(503).json({status:"database unavailable"}); }
+  });
   app.disable("x-powered-by");
   app.use(express.json({ limit: "8mb" }));
   app.use((req, res, next) => {
@@ -61,7 +68,7 @@ export async function createApp({
     res.set("X-Content-Type-Options", "nosniff");
     res.set("Referrer-Policy", "no-referrer");
     res.set("X-Frame-Options", "DENY");
-    res.set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'");
+    res.set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; connect-src 'self'; object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'");
     if (production) res.set("Strict-Transport-Security", "max-age=31536000");
     if (stopping) return res.status(503).json({error:"Server shutting down"});
     if (req.method === "POST" && req.headers.origin) {
@@ -97,7 +104,16 @@ export async function createApp({
       else c.res.write("event: invalidate\ndata: {}\n\n");
     }
   };
-  app.use((req, res, next) => {
+  const databasePoll = store.refresh ? setInterval(async () => {
+    if (stopping || !clients.size) return;
+    try { if (await store.refresh()) invalidate(); }
+    catch (error) { console.error('Database refresh failed:', error.code || error.message); }
+  }, 2000) : undefined;
+  databasePoll?.unref();
+  app.use(async (req, res, next) => {
+    try {
+      if (await store.refresh?.()) invalidate();
+    } catch { return res.status(503).json({error:"Database unavailable. Please try again."}); }
     req.token = req.headers.cookie
       ?.split(";")
       .map((x) => x.trim())
