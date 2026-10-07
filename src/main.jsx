@@ -28,6 +28,7 @@ import { Management, Driver, Schedule, Analytics } from "./pages";
 import "./style.css";
 import { InstallApp } from "./install-app";
 import { useDriverLocation } from "./location-sharing";
+const DailyStatistics = lazy(() => import("./daily-statistics"));
 const LiveDriverMap = lazy(() => import("./driver-map"));
 
 if (import.meta.env.PROD && 'serviceWorker' in navigator) {
@@ -262,6 +263,7 @@ const chefNav = [
   ["Plan", CalendarDays],
   ["Geld", Wallet],
   ["Analyse", ChartNoAxesCombined],
+  ["Statistik", ChartNoAxesCombined],
   ["Kasse", Receipt],
   ["Kunden", Users],
   ["Zeiten", Clock],
@@ -269,6 +271,7 @@ const chefNav = [
   ["Gebiete", MapPin],
   ["Aufgaben", ClipboardList],
   ["Finanzen", Settings],
+  ["Einstellungen", Settings],
   ["Daten", Database],
 ];
 function App() {
@@ -364,6 +367,7 @@ function App() {
       : user.role === "kitchen"
         ? [
             ["Tafel", LayoutDashboard],
+            ["Statistik", ChartNoAxesCombined],
             ["Plan", CalendarDays],
             ["Mein Verdienst", Wallet],
             ["Aufgaben", ClipboardList],
@@ -374,8 +378,10 @@ function App() {
             ["Belege", Receipt],
             ["Plan", CalendarDays],
             ["Verdienst", Wallet],
+            ["Statistik", ChartNoAxesCombined],
           ];
   const current = nav.some((n) => n[0] === page) ? page : nav[0][0];
+  const pendingCorrections = (data.shiftRequests || []).filter(r => r.status === "pending").length;
   const demo =
     data.orders.some((o) => o.demo) || data.employees.some((e) => e.demo);
   return (
@@ -406,6 +412,7 @@ function App() {
               >
                 <Icon size={19} />
                 {label}
+                {label === "Zeiten" && user.role === "chef" && pendingCorrections > 0 && <span className="nav-count">{pendingCorrections}</span>}
                 {label === "Aufgaben" && (
                   <span className="nav-count">
                     {data.tasks.filter((t) => !t.done).length}
@@ -464,6 +471,10 @@ function App() {
           </div>
         </header>
         <main className="content">
+          {user.role === "chef" && pendingCorrections > 0 && <div className="notice location-sharing" role="status">
+            <strong>{pendingCorrections} Zeitkorrektur-Anfrage(n) warten auf deine Entscheidung.</strong>
+            <button className="secondary" onClick={() => go("Zeiten")}>Anfragen prüfen</button>
+          </div>}
           {user.role === "driver" && data.shifts.some(s => s.employeeId === user.id && !s.end) && <div className="notice location-sharing">
             <div><strong>{locationSharing.tracking ? "Standortfreigabe aktiv" : "Standortfreigabe"}</strong><p role="status">{locationSharing.status}</p><small>Für laufende Updates die App geöffnet lassen. Geräte können GPS im Hintergrund pausieren.</small></div>
             <button className="secondary" onClick={locationSharing.toggle}>{locationSharing.tracking ? "Standortfreigabe stoppen" : "Standortfreigabe aktivieren"}</button>
@@ -476,7 +487,9 @@ function App() {
               <span>Kein Live-Betrieb</span>
             </div>
           )}
-          {current === "Heute" ? (
+          {current === "Statistik" ? (
+            <Suspense fallback={<p>Statistik wird geladen …</p>}><DailyStatistics user={user} data={data} /></Suspense>
+          ) : current === "Heute" ? (
             <Dashboard data={data} go={go} act={act} />
           ) : current === "Tafel" ? (
             <>
@@ -620,7 +633,7 @@ export function Drivers({ data }) {
               orders = data.orders.filter(
                 (o) => o.employeeId === e.id && o.status === "open",
               );
-            const delivered = data.orders.filter(o => o.employeeId === e.id && o.deliveredAt && day(o.createdAt) === day(Date.now()));
+            const delivered = data.orders.filter(o => o.employeeId === e.id && o.deliveredAt && o.completionSource !== "clockOut" && day(o.createdAt) === day(Date.now()));
             const minutes = delivered.length ? sum(delivered, o => Math.max(0, (Date.parse(o.deliveredAt) - Date.parse(o.createdAt)) / 60000)) / delivered.length : null;
             return (
               <div className="driver-row" key={e.id}>
@@ -642,10 +655,10 @@ export function Drivers({ data }) {
           })}
       </div>
       <div className="driver-map">
-        <Suspense fallback={<p>Karte wird geladen …</p>}><LiveDriverMap drivers={drivers.filter(e => data.shifts.some(s => s.employeeId === e.id && !s.end))} /></Suspense>
+        <Suspense fallback={<p>Karte wird geladen …</p>}><LiveDriverMap drivers={drivers.filter(e => data.shifts.some(s => s.employeeId === e.id && !s.end))} store={data.settings.store} /></Suspense>
       </div>
       <div className="panel-foot">
-        Lieferzeit: von Erfassung bis Zustellung, inklusive Wartezeit. Die Karte zeigt den zuletzt freiwillig geteilten Standort.
+        Lieferzeit: von Erfassung bis bestätigter Zustellung, inklusive Wartezeit. Automatisch beim Ausstempeln geschlossene Lieferungen sind ausgenommen. Die Karte zeigt freiwillig geteilte GPS-Standorte und geschätzte Rückfahrten. Rückfahrten sind keine Live-Ortung.
       </div>
     </Panel>
   );
